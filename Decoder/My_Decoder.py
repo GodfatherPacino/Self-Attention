@@ -67,78 +67,27 @@ class Decoder(nn.Module):
         self.layers = nn.ModuleList([DecoderLayer() for _ in range(n_layers)])
 
     def forward(self, dec_inputs, enc_inputs, enc_outputs):
-        '''
-        enc_intpus: [batch_size, src_len]
-        dec_inputs: [batch_size, tgt_len]
-        enc_outputs: [batch_size, src_len, d_model]
-        '''
+        """
+        Args:
+            dec_inputs (_type_): [batch_size, tgt_len]
+            enc_inputs (_type_): [batch_size, src_len]
+            enc_outputs (_type_): [batch_size, src_len, d_model]
+        """
         dec_outputs = self.tgt_emb(dec_inputs)  # [batch_size, tgt_len, d_model]
         dec_outputs = self.pos_emb(dec_outputs.transpose(0, 1)).transpose(0, 1)  # [batch_size, tgt_len, d_model]
         # Decoder输入序列的pad mask矩阵（这个例子中decoder是没有加pad的，实际应用中都是有pad填充的）
         dec_self_attn_pad_mask = get_attn_pad_mask(dec_inputs, dec_inputs)  # [batch_size, tgt_len, tgt_len]
-        ''' 'S I like learning P'  'S I am a student'
-        tensor([[[ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False]],
-
-                [[ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False],
-                 [ True, False, False, False, False]]])'''
         # Masked Self_Attention：当前时刻是看不到未来的信息的
-        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(
-            dec_inputs)  # [batch_size, tgt_len, tgt_len] 下三角包括对角线为0，上三角为1
-        '''
-        tensor([[[0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0]],
-
-                 [0, 1, 1, 1, 1],
-                 [0, 0, 1, 1, 1],
-                 [0, 0, 0, 1, 1],
-                 [0, 0, 0, 0, 1],
-                 [0, 0, 0, 0, 0]]], dtype=torch.uint8)'''
+        dec_self_attn_subsequence_mask = get_attn_subsequence_mask(dec_inputs)  # [batch_size, tgt_len, tgt_len]
         # Decoder中把两种mask矩阵相加（既屏蔽了pad的信息，也屏蔽了未来时刻的信息）
-        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequence_mask),
-                                      0)  # [batch_size, tgt_len, tgt_len]
-        '''tensor([[[ True,  True,  True,  True,  True],
-                    [ True, False,  True,  True,  True],
-                    [ True, False, False,  True,  True],
-                    [ True, False, False, False,  True],
-                    [ True, False, False, False, False]],
-
-                    [ True,  True,  True,  True,  True],
-                    [ True, False,  True,  True,  True],
-                    [ True, False, False,  True,  True],
-                    [ True, False, False, False,  True],
-                    [ True, False, False, False, False]]])'''
+        dec_self_attn_mask = torch.gt((dec_self_attn_pad_mask + dec_self_attn_subsequence_mask), 0)  # [batch_size, tgt_len, tgt_len]
         # 这个mask主要用于encoder-decoder attention层
-        # get_attn_pad_mask主要是enc_inputs的pad mask矩阵(因为enc是处理K,V的，求Attention时是用v1,v2,..vm去加权的，
-        # 要把pad对应的v_i的相关系数设为0，这样注意力就不会关注pad向量)
-        #                       dec_inputs只是提供expand的size的
-        dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)  # [batc_size, tgt_len, src_len]
-        '''tensor([[[False, False, False, False, False],
-                    [False, False, False, False, False],
-                    [False, False, False, False, False],
-                    [False, False, False, False, False],
-                    [False, False, False, False, False]],
-
-                    [False, False, False, False,  True],
-                    [False, False, False, False,  True],
-                    [False, False, False, False,  True],
-                    [False, False, False, False,  True],
-                    [False, False, False, False,  True]]])'''
+        dec_enc_attn_mask = get_attn_pad_mask(dec_inputs, enc_inputs)  # [batch_size, tgt_len, src_len]
 
         dec_self_attns, dec_enc_attns = [], []
         for layer in self.layers:
-            # dec_outputs: [batch_size, tgt_len, d_model], dec_self_attn: [batch_size, n_heads, tgt_len, tgt_len], dec_enc_attn: [batch_size, h_heads, tgt_len, src_len]
-            dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_outputs, dec_self_attn_mask,
-                                                             dec_enc_attn_mask)
+            # dec_outputs: [batch_size, tgt_len, d_model], dec_self_attn: [batch_size, n_heads, tgt_len, tgt_len], dec_enc_attn: [batch_size, tgt_len, src_len]
+            dec_outputs, dec_self_attn, dec_enc_attn = layer(dec_outputs, enc_outputs, dec_self_attn_mask, dec_enc_attn_mask)
             dec_self_attns.append(dec_self_attn)
             dec_enc_attns.append(dec_enc_attn)
         return dec_outputs, dec_self_attns, dec_enc_attns
