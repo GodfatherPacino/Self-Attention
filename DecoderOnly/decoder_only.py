@@ -35,7 +35,7 @@ d_model = 128   # 降低维度
 d_ff = 512      # 降低前馈网络维度
 n_layers = 3    # 减少层数
 
-# 构建词典
+# 构建词典：使用词典长度作为新词的索引，确保每个词获得唯一的整数索引。- - 通过 if word not in vocab 确保每个单词只被添加一次。相同的单词在不同句子中出现时会使用相同的索引
 def build_vocab(sentences):
     vocab = {"<PAD>": 0, "<BOS>": 1, "<EOS>": 2}
     for sentence in sentences:
@@ -132,6 +132,11 @@ class DecoderOnly(nn.Module):
 
         for layer in self.layers:
             outputs = layer(outputs, subsequent_mask)
+        
+        # 输出层
+        # outputs: [batch_size, seq_len, vocab_size]
+        print(f"当前outputs维度: {outputs.shape}")
+        # * seq_len 表示序列长度，等于输入序列中的token数量，在生成过程中随着生成token增加而增加
 
         return self.projection(outputs)
 
@@ -141,10 +146,20 @@ class DecoderOnly(nn.Module):
             current_seq = torch.LongTensor([[start_token]])
             generated_tokens = set()
             
+            # ! 从start_token开始，每次生成一个token，直到生成max_len个token或者生成<EOS>
+            # * 如果这里小模型能够直接提供一个已经生成的序列，那么计算次数（也就是这里的循环次数）将会大大减少
             for _ in range(max_len-1):
                 logits = self.forward(current_seq)
+                # ! forward方法会产生outputs，outputs的维度是 [batch_size, seq_len, vocab_size]，其中seq_len表示当前序列 current_seq 的长度
+                # ! 如果采用了推测解码方法，那么这里的current_seq就是已经生成的序列，而不是start_token
+
                 temperature = 0.6
                 logits = logits[:, -1:] / temperature
+                # 打印维度信息
+                print(f"当前序列 current_seq 维度: {current_seq.shape}")  # [1, seq_len]
+                # print(f"当前logits维度: {logits.shape}")  # [1, 1, vocab_size]
+                # logits的最后一维是词表大小，表示每个词的预测概率
+                # current_seq的第二维是序列长度，每次循环都会增加1
                 
                 # 处理概率分布
                 logits = logits.squeeze()
@@ -171,6 +186,8 @@ class DecoderOnly(nn.Module):
                     # 如果采样失败，选择概率最大的token
                     next_token = torch.argmax(probs).unsqueeze(0)
                 
+                # ! 这句代码比较关键
+                # * current_seq 是当前已生成序列，next_token 是当前新生成的token
                 current_seq = torch.cat([current_seq, next_token.unsqueeze(0)], dim=1)
                 generated_tokens.add(next_token.item())
                 
@@ -240,7 +257,13 @@ if __name__ == "__main__":
     train_model(model, train_data)
     
     # 生成文本示例
-    generated = model.generate(vocab['<BOS>'], max_len=10)
+    # generated = model.generate(vocab['<BOS>'], max_len=10)
+    generated = model.generate(vocab['I'], max_len=10)
+
+    # 打印生成的原始token序列
+    print("Generated token sequence:", generated)
+    # 打印token对应的索引值
+    print("Token indices:", [idx.item() for idx in generated])
     # 修改文本生成的处理方式
     generated_text = []
     for idx in generated:
@@ -251,7 +274,7 @@ if __name__ == "__main__":
     print("Generated text:", generated_text)
     
     # 多次测试生成效果
-    print("\n生成多个样本：")
+    """ print("\n生成多个样本：")
     for i in range(5):
         generated = model.generate(vocab['<BOS>'], max_len=10)
         generated_text = []
@@ -260,4 +283,4 @@ if __name__ == "__main__":
             if word and word[0] not in ['<PAD>', '<BOS>', '<EOS>']:
                 generated_text.append(word[0])
         generated_text = ' '.join(generated_text)
-        print(f"Sample {i+1}: {generated_text}")
+        print(f"Sample {i+1}: {generated_text}") """
