@@ -140,65 +140,133 @@ class DecoderOnly(nn.Module):
 
         return self.projection(outputs)
 
+    def draft_generate(self, current_seq, num_tokens=3):
+        """模拟小模型的快速生成"""
+        batch_size = current_seq.size(0)
+        draft_tokens = []
+        
+        # 模拟生成多个token
+        for _ in range(num_tokens):
+            # 随机生成概率分布
+            fake_logits = torch.rand(batch_size, vocab_size)
+            # 过滤特殊token
+            fake_logits[:, vocab['<PAD>']] = -float('inf')
+            fake_logits[:, vocab['<BOS>']] = -float('inf')
+            
+            # 使用相同的采样逻辑
+            probs = torch.softmax(fake_logits / 0.6, dim=-1)
+            next_token = torch.multinomial(probs, 1)
+            draft_tokens.append(next_token)
+            
+        return torch.cat(draft_tokens, dim=1)
+
     def generate(self, start_token, max_len):
         self.eval()
         with torch.no_grad():
             current_seq = torch.LongTensor([[start_token]])
             generated_tokens = set()
+            # 添加计数器
+            draft_accepted_count = 0
+            draft_rejected_count = 0
             
-            # ! 从start_token开始，每次生成一个token，直到生成max_len个token或者生成<EOS>
-            # * 如果这里小模型能够直接提供一个已经生成的序列，那么计算次数（也就是这里的循环次数）将会大大减少
-            for _ in range(max_len-1):
-                logits = self.forward(current_seq)
-                # ! forward方法会产生outputs，outputs的维度是 [batch_size, seq_len, vocab_size]，其中seq_len表示当前序列 current_seq 的长度
-                # ! 如果采用了推测解码方法，那么这里的current_seq就是已经生成的序列，而不是start_token
-
-                temperature = 0.6
-                logits = logits[:, -1:] / temperature
-                # 打印维度信息
-                print(f"当前序列 current_seq 维度: {current_seq.shape}")  # [1, seq_len]
-                # print(f"当前logits维度: {logits.shape}")  # [1, 1, vocab_size]
-                # logits的最后一维是词表大小，表示每个词的预测概率
-                # current_seq的第二维是序列长度，每次循环都会增加1
+            while len(current_seq[0]) < max_len:
+                # 使用draft模型生成多个token
+                draft_tokens = self.draft_generate(current_seq)
+                print(f"当前draft tokens: {draft_tokens}")
                 
-                # 处理概率分布
-                logits = logits.squeeze()
-                # 设置最小值避免数值问题
-                logits = torch.clamp(logits, min=-100, max=100)
+                # 将draft tokens添加到当前序列
+                draft_seq = torch.cat([current_seq, draft_tokens], dim=1)
                 
-                # 过滤已生成的token和特殊标记
-                for token in generated_tokens:
-                    logits[token] *= 0.3
-                logits[vocab['<PAD>']] = -float('inf')
-                logits[vocab['<BOS>']] = -float('inf')
+                # 使用原模型验证
+                logits = self.forward(draft_seq)
                 
-                # 使用 softmax 获取概率分布
-                probs = torch.softmax(logits, dim=-1)
-                # 确保概率和为1且没有无效值
-                probs = torch.nan_to_num(probs, 0.0)
-                if probs.sum() == 0:
-                    probs = torch.ones_like(probs) / probs.size(0)
-                
-                # 采样下一个token
-                try:
-                    next_token = torch.multinomial(probs, 1)
-                except RuntimeError:
-                    # 如果采样失败，选择概率最大的token
-                    next_token = torch.argmax(probs).unsqueeze(0)
-                
-                # ! 这句代码比较关键
-                # * current_seq 是当前已生成序列，next_token 是当前新生成的token
-                current_seq = torch.cat([current_seq, next_token.unsqueeze(0)], dim=1)
-                generated_tokens.add(next_token.item())
-                
-                if next_token.item() == vocab['<EOS>']:
-                    break
-                
-                # 控制生成长度
-                if len(current_seq[0]) >= 6:
-                    current_seq = torch.cat([current_seq, torch.LongTensor([[vocab['<EOS>']]])], dim=1)
-                    break
+                # 验证每个位置
+                valid_length = 0
+                for pos in range(len(draft_tokens[0])):
+                    pos_logits = logits[:, len(current_seq[0])+pos:len(current_seq[0])+pos+1]
+                    #! 计算pos_logits的概率是从 logits中取值，logits只在forward计算一次
+                    pos_probs = torch.softmax(pos_logits / 0.6, dim=-1)
                     
+                    # 增加验证条件
+                    draft_token = draft_tokens[0, pos].item()
+                    draft_prob = pos_probs.squeeze()[draft_token]
+                    
+                    # 1. 检查是否在top-k中
+                    top_k = 5  # 增加top-k的值
+                    _, top_indices = torch.topk(pos_probs.squeeze(), top_k)
+                    
+                    # 2. 检查概率是否足够高
+                    prob_threshold = 0.99  # 添加概率阈值
+                    
+                    if draft_token in top_indices and draft_prob > prob_threshold:
+                        valid_length += 1
+                        print(f"Token {draft_token} 通过验证，概率: {draft_prob:.4f}")
+                    else:
+                        print(f"Token {draft_token} 未通过验证，概率: {draft_prob:.4f}")
+                        break
+                
+                # 添加验证通过的tokens
+                if valid_length > 0:
+                    accepted_tokens = draft_tokens[:, :valid_length]
+                    current_seq = torch.cat([current_seq, accepted_tokens], dim=1)
+                    for token in accepted_tokens[0]:
+                        token_val = token.item()
+                        generated_tokens.add(token_val)
+                        print(f"接受draft token: {token_val}")
+                    draft_accepted_count += valid_length
+                    if len(draft_tokens[0]) > valid_length:
+                        draft_rejected_count += 1
+                else:
+                    draft_rejected_count += 1
+                    # 如果没有token通过验证，使用原始生成方式
+                    logits = logits[:, -1:] / 0.6
+                    # 打印维度信息
+                    print(f"当前序列 current_seq 维度: {current_seq.shape}")  # [1, seq_len]
+                    # print(f"当前logits维度: {logits.shape}")  # [1, 1, vocab_size]
+                    # logits的最后一维是词表大小，表示每个词的预测概率
+                    # current_seq的第二维是序列长度，每次循环都会增加1
+                    
+                    # 处理概率分布
+                    logits = logits.squeeze()
+                    # 设置最小值避免数值问题
+                    logits = torch.clamp(logits, min=-100, max=100)
+                    
+                    # 过滤已生成的token和特殊标记
+                    for token in generated_tokens:
+                        logits[token] *= 0.3
+                    logits[vocab['<PAD>']] = -float('inf')
+                    logits[vocab['<BOS>']] = -float('inf')
+                    
+                    # 使用 softmax 获取概率分布
+                    probs = torch.softmax(logits, dim=-1)
+                    # 确保概率和为1且没有无效值
+                    probs = torch.nan_to_num(probs, 0.0)
+                    if probs.sum() == 0:
+                        probs = torch.ones_like(probs) / probs.size(0)
+                    
+                    # 采样下一个token
+                    try:
+                        next_token = torch.multinomial(probs, 1)
+                    except RuntimeError:
+                        # 如果采样失败，选择概率最大的token
+                        next_token = torch.argmax(probs).unsqueeze(0)
+                    
+                    # ! 这句代码比较关键
+                    # * current_seq 是当前已生成序列，next_token 是当前新生成的token
+                    current_seq = torch.cat([current_seq, next_token.unsqueeze(0)], dim=1)
+                    generated_tokens.add(next_token.item())
+                    
+                    if next_token.item() == vocab['<EOS>']:
+                        break
+                    
+                    # 控制生成长度
+                    if len(current_seq[0]) >= 6:
+                        current_seq = torch.cat([current_seq, torch.LongTensor([[vocab['<EOS>']]])], dim=1)
+                        break
+                        
+            print(f"\n生成统计:")
+            print(f"- 接受的draft tokens数量: {draft_accepted_count}")
+            print(f"- 重新生成的次数: {draft_rejected_count}")
             return current_seq.squeeze()
 
 # 训练相关代码
